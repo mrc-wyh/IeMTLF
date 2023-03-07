@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import dgl
 from data_prepare import Data
-from model import SeqPred, SlotEncoding, GeoGCN, DatasetPrePare, EarlyStopping, SemanticAttention
+from model import SeqPred, SlotEncoding, GeoGCN, DatasetPrePare, EarlyStopping, Interaction
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from time import time
@@ -47,7 +47,7 @@ def increment_path(path, exist_ok=False, sep='', mkdir=True):
         dir_.mkdir(parents=True, exist_ok=True)  # make directory
     return path
 
-def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, device):
+def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, interaction_model, device):
     traj_n = len(data_b) #batch值
     batch_input_emb = []
     batch_loc_labels = []
@@ -89,24 +89,27 @@ def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, 
         user_emb = user_emb.expand(len(loc_s_emb), -1)
         # joint_emb = torch.cat((user_emb, cat_s_emb, loc_s_emb, timeslot_emb, dw_emb), 1)
         # low_order = feature_fuse_model(joint_emb)
-        init_emb = user_emb + cat_s_emb + loc_s_emb + timeslot_emb + dw_emb 
+        # init_emb = user_emb + loc_s_emb 
+        # init_emb = user_emb + cat_s_emb + loc_s_emb + timeslot_emb + dw_emb 
         #下一步考虑注意力融合机制
         
         if args.interaction:
-            user_loc = user_emb * loc_s_emb
-            user_cat = user_emb * cat_s_emb
+            # user_loc = interest_model(user_emb, loc_s_emb)
+            user_loc = user_emb + loc_s_emb
+            time_emb = timeslot_emb + dw_emb
+            cat_time = interaction_model(cat_s_emb, time_emb)
             # user_ts = user_emb * timeslot_emb
             # user_dw = user_emb * dw_emb
-            cat_ts = cat_s_emb * timeslot_emb
+            # cat_ts = cat_s_emb * timeslot_emb
             # cat_dw = cat_s_emb * dw_emb
             # loc_ts = loc_s_emb * timeslot_emb
             # loc_dw = loc_s_emb * dw_emb
-        # second_order = torch.cat((user_loc, user_cat, user_ts, user_dw, cat_ts, cat_dw, loc_ts, loc_dw), 1)
-            z = torch.cat([torch.unsqueeze(init_emb, 1) , torch.unsqueeze(user_loc, 1), torch.unsqueeze(user_cat, 1), torch.unsqueeze(cat_ts, 1)], 1)
+            input_emb = torch.cat((user_loc, cat_time), 1)
+            # z = torch.cat([torch.unsqueeze(init_emb, 1) , torch.unsqueeze(user_loc, 1), torch.unsqueeze(user_cat, 1), torch.unsqueeze(cat_ts, 1)], 1)
             # input_emb = feature_attention_model(z)
             # input_emb = init_emb + user_loc + user_cat + user_ts + user_dw + cat_ts + cat_dw + loc_ts + loc_dw
         else:
-            input_emb = init_emb
+            input_emb = user_emb + cat_s_emb + loc_s_emb + timeslot_emb + dw_emb
         batch_input_emb.append(input_emb)
         batch_loc_labels.append(torch.tensor(loc_labels).to(device))
         batch_cat_labels.append(torch.tensor(cat_labels).to(device))
@@ -154,12 +157,14 @@ def cal_acc_mrr(idxx, label, indices):
     return acc_1, acc_5, acc_10, acc_20, mrr
 
 def evaluate(args, valid_loader, data, max_len, time_emb_model, user_emb_model, cat_emb_model, 
-             loc_emb_model, geogcn_model, transformer_encoder_model, loss_fn, device):
+             loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, loss_fn, device):
 # def evaluate(args, valid_loader, data, max_len, time_emb_model, user_emb_model, 
 #              loc_emb_model, geogcn_model, transformer_encoder_model, loss_fn, device):
     user_emb_model.eval()
     cat_emb_model.eval()
     loc_emb_model.eval()   
+    interaction_model.eval()   
+    # interest_model.eval()   
     geogcn_model.eval()
     transformer_encoder_model.eval()
     cat_emb = cat_emb_model(torch.tensor(range(data.cat_num)).to(device))
@@ -178,7 +183,7 @@ def evaluate(args, valid_loader, data, max_len, time_emb_model, user_emb_model, 
         # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, 
         #                                                                      user_emb_model, device)
         batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, 
-                                                                             user_emb_model, device)
+                                                                             user_emb_model, interaction_model, device)
         # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, user_emb_model, device)
         # batch_emb, labels_emb, label_loc = batch_seq_emb(data_b, max_len, loc_emb, time_emb_model, user_emb_model, device)
         seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask)
@@ -259,17 +264,19 @@ def main(args):
         stopper = EarlyStopping(args.patience)
         
     data = Data(args)
-    time_emb_model = SlotEncoding(args.hidden_dim, device=device)
+    time_emb_model = SlotEncoding(args.time_dim, device=device)
     user_emb_model = nn.Embedding(data.user_num, args.hidden_dim).to(device)
-    cat_emb_model = nn.Embedding(data.cat_num, args.hidden_dim).to(device) #可以测试不单独学习类别嵌入，使用同类别下的位置嵌入均值作为类别嵌入
+    cat_emb_model = nn.Embedding(data.cat_num, args.time_dim).to(device) 
     loc_emb_model = nn.Embedding(data.loc_num, args.hidden_dim).to(device)
+    interaction_model = Interaction(args.time_dim, args.time_dim, args.time_dim).to(device)
+    # interest_model = Interaction(args.hidden_dim, args.hidden_dim, args.hidden_dim).to(device)
     # feature_attention_model = SemanticAttention(args.hidden_dim, args.hidden_dim * 2).to(device)
     geogcn_model = GeoGCN(data.loc_g, data.tran_edge_weight, args, device).to(device)
     transformer_encoder_model = SeqPred(data.cat_num, data.loc_num, args, device).to(device)
     optimizer = torch.optim.Adam(params=list(user_emb_model.parameters()) +
                                   list(cat_emb_model.parameters()) +
                                   list(loc_emb_model.parameters()) +
-                                #   list(feature_attention_model.parameters()) +
+                                  list(interaction_model.parameters()) +
                                   list(geogcn_model.parameters()) +
                                   list(transformer_encoder_model.parameters()),
                            lr=args.lr,
@@ -301,7 +308,7 @@ def main(args):
         user_emb_model.train()
         cat_emb_model.train()
         loc_emb_model.train()
-        # feature_attention_model.train()
+        interaction_model.train()
         geogcn_model.train()
         transformer_encoder_model.train()
         for b, data_b in enumerate(train_loader):
@@ -310,7 +317,7 @@ def main(args):
             loc_emb = geogcn_model(loc_emb)
             # cat_emb = cluster_center(data.loc_cat, loc_emb, device)
             batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask = batch_seq_emb(args, data_b, args.traj_max_len, cat_emb, loc_emb, time_emb_model, 
-                                                                                 user_emb_model, device)
+                                                                                 user_emb_model, interaction_model, device)
             # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, args.traj_max_len, cat_emb, loc_emb, time_emb_model, 
             #                                                                      user_emb_model, device)
             seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask)
@@ -343,19 +350,19 @@ def main(args):
             n_tmp = torch.where(tmp<0, 0, tmp)
             contradiction = torch.eq(loc_map_cat, cat_pos)
             contradiction = contradiction * n_tmp
-            loc_p_cat_right = torch.eq(loc_map_cat, cat_labels_emb)
-            loc_p_cat_right = loc_p_cat_right * n_tmp
-            penalty_w = ~torch.eq(contradiction, loc_p_cat_right)#False:直接预测的位置对应的类别正确，直接预测的类别与上述类别不一致，对其相应的cat_loss惩罚
-            p_cat_labels = penalty_w * cat_labels_emb
-            p_cat_labels = torch.where(p_cat_labels==0, -1, p_cat_labels)
-            penalty_loss_cat = loss_fn(seq_out_cat.transpose(1, 2), p_cat_labels)
+            # loc_p_cat_right = torch.eq(loc_map_cat, cat_labels_emb)
+            # loc_p_cat_right = loc_p_cat_right * n_tmp
+            # penalty_w = ~torch.eq(contradiction, loc_p_cat_right)#False:直接预测的位置对应的类别正确，直接预测的类别与上述类别不一致，对其相应的cat_loss惩罚
+            # p_cat_labels = penalty_w * cat_labels_emb
+            # p_cat_labels = torch.where(p_cat_labels==0, -1, p_cat_labels)
+            # penalty_loss_cat = loss_fn(seq_out_cat.transpose(1, 2), p_cat_labels)
             
-            cat_right = torch.eq(cat_pos, cat_labels_emb)
-            cat_right = cat_right * n_tmp
-            penalty_l = ~torch.eq(contradiction, cat_right)#False:直接预测的类别正确，直接预测的位置对应的类别与上述类别不一致，对其相应的loc_loss惩罚
-            p_loc_labels = penalty_l * loc_labels_emb
-            p_loc_labels = torch.where(p_loc_labels==0, -1, p_loc_labels)
-            penalty_loss_loc = loss_fn(seq_out_loc.transpose(1, 2), p_loc_labels)
+            # cat_right = torch.eq(cat_pos, cat_labels_emb)
+            # cat_right = cat_right * n_tmp
+            # penalty_l = ~torch.eq(contradiction, cat_right)#False:直接预测的类别正确，直接预测的位置对应的类别与上述类别不一致，对其相应的loc_loss惩罚
+            # p_loc_labels = penalty_l * loc_labels_emb
+            # p_loc_labels = torch.where(p_loc_labels==0, -1, p_loc_labels)
+            # penalty_loss_loc = loss_fn(seq_out_loc.transpose(1, 2), p_loc_labels)
             
             pp_cat_labels = contradiction * cat_labels_emb
             pp_loc_labels = contradiction * loc_labels_emb
@@ -364,8 +371,8 @@ def main(args):
             pen_cat = loss_fn(seq_out_cat.transpose(1, 2), pp_cat_labels)
             pen_loc = loss_fn(seq_out_loc.transpose(1, 2), pp_loc_labels)
             # '''  
-            penalty_loss_cat = 0
-            penalty_loss_loc = 0
+            # penalty_loss_cat = 0
+            # penalty_loss_loc = 0
             
             #计算embedding的余弦相似度损失
             # cat_emb_cos = cat_emb.unsqueeze(1)
@@ -377,7 +384,8 @@ def main(args):
             #     else:
             #         emb_cos_loss += loss_cos(loc_emb, cat_emb_cos[i], target)
             # emb_cos_loss = emb_cos_loss / data.cat_num
-            loss = loss_loc + args.cat_loss_w * loss_cat + penalty_loss_cat + penalty_loss_loc + pen_cat + pen_loc
+            loss = loss_loc + loss_cat + pen_cat + pen_loc
+            # loss = loss_loc + args.cat_loss_w * loss_cat + penalty_loss_cat + penalty_loss_loc + pen_cat + pen_loc
             # loss = loss_loc + args.cat_loss_w * loss_cat + emb_cos_loss
             optimizer.zero_grad()
             loss.backward(retain_graph=True)
@@ -408,8 +416,9 @@ def main(args):
         epoch_train_loss = np.mean(train_loss_total_list)
         
         val_perf = evaluate(args, valid_loader, data, args.traj_max_len, time_emb_model, user_emb_model, cat_emb_model, 
-                            loc_emb_model, geogcn_model, transformer_encoder_model, loss_fn, device)
+                            loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, loss_fn, device)
         monitor_loss = val_perf[-1]
+        # monitor_score = 3 * val_perf[0] + val_perf[3]
         monitor_score = np.sum(val_perf[0:4])
         lr_scheduler.step(monitor_score)
         # lr_scheduler.step(monitor_loss)
@@ -421,7 +430,7 @@ def main(args):
             logging.log(23,f"Epoch {epoch} valid:loss_total = {val_perf[-1]:.6f} valid:loss_cat = {val_perf[-2]:.6f} valid:loss_loc = {val_perf[-3]:.6f} Score: {np.sum(val_perf[0:4]):.4f} Acc@20:{val_perf[3]:.4f} Acc@10:{val_perf[2]:.4f} Acc@5:{val_perf[1]:.4f} Acc@1:{val_perf[0]:.4f} MRR:{val_perf[4]:.4f} {duration:.3f} sec")    
         
         if args.early_stop and epoch != 0:
-            if stopper.step(monitor_score, monitor_loss, user_emb_model, cat_emb_model, loc_emb_model, geogcn_model, transformer_encoder_model, epoch, result_dir):
+            if stopper.step(monitor_score, monitor_loss, user_emb_model, cat_emb_model, loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, epoch, result_dir):
                 break  
         # if args.early_stop and epoch != 0:
         #     if stopper.step(monitor_score, monitor_loss, user_emb_model, loc_emb_model, geogcn_model, transformer_encoder_model, epoch, result_dir):
@@ -442,7 +451,7 @@ def main(args):
     test_loader = DataLoader(test_dataset, batch_size=args.batch,
                             shuffle=False, pin_memory=True, num_workers=0, collate_fn=lambda x:x)
     test_perf = evaluate(args, test_loader, data, args.traj_max_len, time_emb_model, user_emb_model, cat_emb_model, 
-                         loc_emb_model, geogcn_model, transformer_encoder_model, loss_fn, device)
+                         loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, loss_fn, device)
     # test_perf = evaluate(args, test_loader, data, args.traj_max_len, time_emb_model, user_emb_model, 
     #                         loc_emb_model, geogcn_model, transformer_encoder_model, loss_fn, device)
     logging.log(23,f"test: loss_total = {val_perf[-1]:.6f} loss_cat = {val_perf[-2]:.6f} loss_loc = {val_perf[-3]:.6f} Acc@20:{test_perf[3]:.4f} Acc@10:{test_perf[2]:.4f} Acc@5:{test_perf[1]:.4f} Acc@1:{test_perf[0]:.4f} MRR:{test_perf[4]:.4f} {runtime:.3f} sec")    
@@ -461,6 +470,7 @@ if __name__ == '__main__':
     parser.add_argument("--gcn_drop", type=float, default=0, help="GeoGCN dropout probability")
     parser.add_argument("--enc_drop", type=float, default=0.2, help="Encoder dropout probability")
     parser.add_argument('--hidden_dim', type=int, default=128, help='Model Layer connection dim')          
+    parser.add_argument('--time_dim', type=int, default=32, help='Model Layer connection dim')          
     parser.add_argument('--enc_layer_num', type=int, default=1, help='Number of TransformerEncoder layers.')     
     parser.add_argument('--GeoGCN_layer_num', type=int, default=2, help='Number of Conv layers.')     
     parser.add_argument('--lr', type=float, default=1e-3, help='Initial learning rate.')
@@ -470,7 +480,7 @@ if __name__ == '__main__':
     parser.add_argument('--patience', type=int, default=20, help='Patience in early stopping')
     parser.add_argument('--lr_patience', type=int, default=5, help='Patience in early stopping')
     parser.add_argument('--cat_loss_w', type=int, default=1, help='cat-loss weight')
-    parser.add_argument('--interaction', type=int, default=0, help='interaction or not')
+    parser.add_argument('--interaction', type=int, default=1, help='interaction or not')
     parser.add_argument('--seed', type=int, default=42, help="seed for our system")
     parser.add_argument('--print_interval', type=int, default=1, help="the interval of printing in training")
     parser.add_argument('--week', type=int, default=1, help="the interval of printing in training")
