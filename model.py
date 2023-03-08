@@ -177,7 +177,7 @@ class SeqPred(nn.Module):
                 device='cuda'
                 ):
         super(SeqPred, self).__init__()
-        self.dim = args.hidden_dim + args.time_dim
+        self.dim = args.hidden_dim * 2 + args.time_dim * 3 + 12
         self.src_mask = None
         self.pos_encoder = PositionalEncoding(self.dim, args.enc_drop)
         encoder_layers = TransformerEncoderLayer(self.dim, args.enc_nhead, args.enc_ffn_hdim, args.enc_drop)
@@ -235,21 +235,43 @@ class FFN(nn.Module):
         return self.w_2(self.dropout(self.act(self.w_1(x))))
         # return self.w_2(self.dropout(torch.relu(self.w_1(x))))
 
-class ThreeInteraction(nn.Module):
-    def __init__(self, dim1, dim2, dim3, out_dim):
-        super(ThreeInteraction, self).__init__()
-        in_dim = dim1 + dim2 + dim3
-        self.mul_inter = nn.Linear(in_dim, out_dim)
-        self.leaky_relu = nn.LeakyReLU(0.2)
-        nn.init.xavier_uniform_(self.mul_inter.weight, gain=1.414)
+class Gen_Coaction(nn.Module):
+    def __init__(self, args, orders=2):
+        super(Gen_Coaction, self).__init__()
+        # self.dim = dim
+        self.weight_emb_w = args.co_action_w
+        self.orders = orders
 
+    def forward(self, input, mlp):
+        # weight = []
+        # idx = 0
+        weight_orders = []
+        for i in range(self.orders):
+            weight= []
+            idx = 0 
+            for w in self.weight_emb_w:
+                # print(w[0]*w[1])
+                weight.append(torch.reshape(mlp[:, idx:idx+w[0]*w[1]], [-1, w[0], w[1]]))
+                idx += w[0] * w[1]
+            weight_orders.append(weight)
 
-    def forward(self, emb1, emb2, emb3):
-        x = self.mul_inter(torch.cat((emb1, emb2, emb3), 1))
-        x = self.leaky_relu(x)
-        return x
-
-class Interaction(nn.Module):
+        out_seq = []
+        hh = []
+        for i in range(self.orders):
+            hh.append(input ** (i+1))
+        for i, h in enumerate(hh):
+            weight = weight_orders[0]
+            h_order = []
+            for j, w in enumerate(weight):
+                h = torch.matmul(h, w)
+                if j != len(weight)-1:
+                    h = torch.tanh(h)
+                h_order.append(h)
+            out_seq.append(torch.concat(h_order, 2))
+        out = torch.sum(torch.concat(out_seq, 1), 1)
+        return out
+    
+class Interaction(nn.Module):#MLP方式的交互
     def __init__(self, dim1, dim2, out_dim):
         super(Interaction, self).__init__()
         in_dim = dim1 + dim2
@@ -285,12 +307,12 @@ class EarlyStopping:
         self.best_epoch = None
         self.best_epoch_val_loss = 0
         
-    def step(self, score, loss, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, epoch, result_dir):
+    def step(self, score, loss, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, loc_input_model, epoch, result_dir):
         if self.best_score is None:
             self.best_score = score
             self.best_epoch = epoch
             self.best_epoch_val_loss = loss
-            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, result_dir)
+            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, loc_input_model, result_dir)
         elif score < self.best_score:
             self.counter += 1
             if self.counter >= self.patience:
@@ -299,17 +321,19 @@ class EarlyStopping:
             self.best_score = score
             self.best_epoch = epoch
             self.best_epoch_val_loss = loss
-            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, result_dir)
+            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, loc_input_model, result_dir)
             self.counter = 0
         return self.early_stop
 
-    def save_checkpoint(self, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, result_dir):
+    def save_checkpoint(self, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, loc_input_model, result_dir):
         # Saves model when validation loss decrease.
         state_dict = {
             'user_emb_model_state_dict': user_model.state_dict(),
             'cat_emb_model_state_dict': cat_model.state_dict(),
             'loc_emb_model_state_dict': loc_model.state_dict(),
-            'interaction_model_state_dict': interaction_model.state_dict(),
+            'user_mlp_model_state_dict': user_mlp_model.state_dict(),
+            'loc_input_model_state_dict': loc_input_model.state_dict(),
+            # 'interaction_model_state_dict': interaction_model.state_dict(),
             'geogcn_model_state_dict': gcn_model.state_dict(),
             'transformer_encoder_model_state_dict': enc_model.state_dict()
             } 
