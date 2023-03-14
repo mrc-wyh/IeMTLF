@@ -47,7 +47,7 @@ def increment_path(path, exist_ok=False, sep='', mkdir=True):
         dir_.mkdir(parents=True, exist_ok=True)  # make directory
     return path
 
-def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, interaction_model, user_mlp_model, loc_input_model, coaction, device):
+def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, device):
     traj_n = len(data_b) #batch值
     batch_input_emb = []
     batch_loc_labels = []
@@ -74,7 +74,9 @@ def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, 
         dw_emb = pos_emb(torch.tensor(day_of_week).to(device))
         user_emb = user_emb_model(torch.tensor(data_b[i][2]).to(device)).unsqueeze(0)
         user_mlp = user_mlp_model(torch.tensor(data_b[i][2]).to(device)).unsqueeze(0)
+        cat_mlp = cat_mlp_model(torch.tensor(cat).to(device))
         loc_input = loc_input_model(torch.tensor(loc).to(device))
+        # cat_input = cat_input_model(torch.tensor(cat).to(device))
         # if args.time_wd == 1:
         #     input_emb = loc_s_emb + timeslot_emb + dw_emb + user_emb
         # else:
@@ -86,24 +88,27 @@ def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, 
         #         input_emb = loc_s_emb + user_emb
 
         # input_emb = loc_s_emb + timeslot_emb + dw_emb + user_emb + cat_s_emb
-        #MLP学习低阶交互
         user_emb = user_emb.expand(len(loc_s_emb), -1)
         user_mlp = user_mlp.expand(len(loc_s_emb), -1)
         # joint_emb = torch.cat((user_emb, cat_s_emb, loc_s_emb, timeslot_emb, dw_emb), 1)
         # low_order = feature_fuse_model(joint_emb)
         # init_emb = user_emb + loc_s_emb 
         # init_emb = user_emb + cat_s_emb + loc_s_emb + timeslot_emb + dw_emb 
-        #下一步考虑注意力融合机制
         
         if args.interaction:
+            time_emb = timeslot_emb + dw_emb
+            cat_time = cat_s_emb * time_emb#显式交互
             # user_loc = interest_model(user_emb, loc_s_emb)
             if args.co_action:
                 user_loc = coaction(loc_input, user_mlp)
+                cat_loc = coaction(loc_input, cat_mlp)
+                # cat_time = coaction(time_emb, cat_mlp)
+                # user_cat = coaction(cat_input, user_mlp)
             else:
                 user_loc = torch.cat((user_emb, loc_s_emb), 1)
             # user_loc = user_emb + loc_s_emb
-            time_emb = timeslot_emb + dw_emb
-            cat_time = cat_s_emb * time_emb#显式交互
+            # time_emb = timeslot_emb + dw_emb
+            # cat_time = cat_s_emb * time_emb#显式交互
             # cat_time = interaction_model(cat_s_emb, time_emb)#MLP交互
             # user_ts = user_emb * timeslot_emb
             # user_dw = user_emb * dw_emb
@@ -112,7 +117,11 @@ def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, 
             # loc_ts = loc_s_emb * timeslot_emb
             # loc_dw = loc_s_emb * dw_emb
             # input_emb = torch.cat((user_loc, cat_time), 1)
-            input_emb = torch.cat((user_emb, loc_s_emb, cat_s_emb, time_emb, user_loc, cat_time), 1)#
+            # input_emb = torch.cat((user_emb, loc_s_emb, cat_s_emb, time_emb, user_cat, cat_time), 1)#
+            # input_emb = torch.cat((user_emb, loc_s_emb, cat_s_emb, time_emb, user_loc, user_cat, cat_time), 1)#
+            # input_emb = torch.cat((user_emb, loc_s_emb, cat_s_emb, timeslot_emb, dw_emb, user_loc, cat_time), 1)#
+            # input_emb = torch.cat((user_emb, loc_s_emb, cat_s_emb, time_emb, user_loc, cat_time), 1)#
+            input_emb = torch.cat((user_emb, loc_s_emb, cat_s_emb, time_emb, user_loc, cat_time, cat_loc), 1)#
             # input_emb = torch.cat((user_loc, cat_s_emb, time_emb, cat_time), 1)
             # z = torch.cat([torch.unsqueeze(init_emb, 1) , torch.unsqueeze(user_loc, 1), torch.unsqueeze(user_cat, 1), torch.unsqueeze(cat_ts, 1)], 1)
             # input_emb = feature_attention_model(z)
@@ -166,13 +175,17 @@ def cal_acc_mrr(idxx, label, indices):
     return acc_1, acc_5, acc_10, acc_20, mrr
 
 def evaluate(args, valid_loader, data, max_len, time_emb_model, user_emb_model, cat_emb_model, 
-             loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, user_mlp_model, loc_input_model, coaction, loss_fn, device):
+             loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, loss_fn, device):
 # def evaluate(args, valid_loader, data, max_len, time_emb_model, user_emb_model, 
 #              loc_emb_model, geogcn_model, transformer_encoder_model, loss_fn, device):
     user_emb_model.eval()
     cat_emb_model.eval()
     loc_emb_model.eval()   
-    interaction_model.eval()   
+    user_mlp_model.eval()   
+    cat_mlp_model.eval()   
+    loc_input_model.eval()   
+    # cat_input_model.eval()   
+    # interaction_model.eval()   
     # interest_model.eval()   
     geogcn_model.eval()
     transformer_encoder_model.eval()
@@ -192,7 +205,7 @@ def evaluate(args, valid_loader, data, max_len, time_emb_model, user_emb_model, 
         # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, 
         #                                                                      user_emb_model, device)
         batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, 
-                                                                             user_emb_model, interaction_model, user_mlp_model, loc_input_model, coaction, device)
+                                                                             user_emb_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, device)
         # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, user_emb_model, device)
         # batch_emb, labels_emb, label_loc = batch_seq_emb(data_b, max_len, loc_emb, time_emb_model, user_emb_model, device)
         seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask)
@@ -281,19 +294,21 @@ def main(args):
     loc_emb_model = nn.Embedding(data.loc_num, args.hidden_dim).to(device)
     if args.co_action:
         user_mlp_model = nn.Embedding(data.user_num, WEIGHT_EMB_DIM).to(device)
+        cat_mlp_model = nn.Embedding(data.cat_num, WEIGHT_EMB_DIM).to(device)
         loc_input_model = nn.Embedding(data.loc_num, co_action_w[0][0]).to(device)
+        cat_input_model = nn.Embedding(data.cat_num, co_action_w[0][0]).to(device)
         coaction = Gen_Coaction(args)
     interaction_model = Interaction(args.time_dim, args.time_dim, args.time_dim).to(device)
-    # interest_model = Interaction(args.hidden_dim, args.hidden_dim, args.hidden_dim).to(device)
-    # feature_attention_model = SemanticAttention(args.hidden_dim, args.hidden_dim * 2).to(device)
+
     geogcn_model = GeoGCN(data.loc_g, data.tran_edge_weight, args, device).to(device)
     transformer_encoder_model = SeqPred(data.cat_num, data.loc_num, args, device).to(device)
     optimizer = torch.optim.Adam(params=list(user_emb_model.parameters()) +
                                   list(cat_emb_model.parameters()) +
                                   list(loc_emb_model.parameters()) +
                                   list(user_mlp_model.parameters()) +
+                                  list(cat_mlp_model.parameters()) +
                                   list(loc_input_model.parameters()) +
-                                  list(interaction_model.parameters()) +
+                                #   list(cat_input_model.parameters()) +
                                   list(geogcn_model.parameters()) +
                                   list(transformer_encoder_model.parameters()),
                            lr=args.lr,
@@ -326,8 +341,10 @@ def main(args):
         cat_emb_model.train()
         loc_emb_model.train()
         user_mlp_model.train()
+        cat_mlp_model.train()
         loc_input_model.train()
-        interaction_model.train()
+        # cat_input_model.train()
+        # interaction_model.train()
         geogcn_model.train()
         transformer_encoder_model.train()
         for b, data_b in enumerate(train_loader):
@@ -336,7 +353,7 @@ def main(args):
             loc_emb = geogcn_model(loc_emb)
             # cat_emb = cluster_center(data.loc_cat, loc_emb, device)
             batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask = batch_seq_emb(args, data_b, args.traj_max_len, cat_emb, loc_emb, time_emb_model, 
-                                                                                 user_emb_model, interaction_model, user_mlp_model, loc_input_model, coaction, device)
+                                                                                 user_emb_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, device)
             # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, args.traj_max_len, cat_emb, loc_emb, time_emb_model, 
             #                                                                      user_emb_model, device)
             seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask)
@@ -436,7 +453,7 @@ def main(args):
         epoch_train_loss = np.mean(train_loss_total_list)
         
         val_perf = evaluate(args, valid_loader, data, args.traj_max_len, time_emb_model, user_emb_model, cat_emb_model, 
-                            loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, user_mlp_model, loc_input_model, coaction, loss_fn, device)
+                            loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, loss_fn, device)
         monitor_loss = val_perf[-1]
         monitor_score = val_perf[0] + val_perf[3]
         score = np.sum(val_perf[0:4])
@@ -450,12 +467,9 @@ def main(args):
             logging.log(23,f"Epoch {epoch} valid:loss_total = {val_perf[-1]:.6f} valid:loss_cat = {val_perf[-2]:.6f} valid:loss_loc = {val_perf[-3]:.6f} Score: {np.sum(val_perf[0:4]):.4f} Acc@20:{val_perf[3]:.4f} Acc@10:{val_perf[2]:.4f} Acc@5:{val_perf[1]:.4f} Acc@1:{val_perf[0]:.4f} MRR:{val_perf[4]:.4f} {duration:.3f} sec")    
         
         if args.early_stop and epoch != 0:
-            if stopper.step(score, monitor_loss, user_emb_model, cat_emb_model, loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, user_mlp_model, loc_input_model, epoch, result_dir):
+            if stopper.step(score, monitor_loss, user_emb_model, cat_emb_model, loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, epoch, result_dir):
                 break  
-        # if args.early_stop and epoch != 0:
-        #     if stopper.step(monitor_score, monitor_loss, user_emb_model, loc_emb_model, geogcn_model, transformer_encoder_model, epoch, result_dir):
-        #         break  
-    
+
     runtime = time() - start_time
     torch.cuda.empty_cache()
     if args.early_stop:
@@ -466,14 +480,16 @@ def main(args):
         cat_emb_model.load_state_dict(state_dict['cat_emb_model_state_dict'])   
         loc_emb_model.load_state_dict(state_dict['loc_emb_model_state_dict'])   
         user_mlp_model.load_state_dict(state_dict['user_mlp_model_state_dict'])   
+        cat_mlp_model.load_state_dict(state_dict['cat_mlp_model_state_dict'])   
         loc_input_model.load_state_dict(state_dict['loc_input_model_state_dict'])   
+        cat_input_model.load_state_dict(state_dict['cat_input_model_state_dict'])   
         geogcn_model.load_state_dict(state_dict['geogcn_model_state_dict'])   
         transformer_encoder_model.load_state_dict(state_dict['transformer_encoder_model_state_dict'])    
     test_dataset = DatasetPrePare(data.test_forward, data.test_labels, data.test_user)
     test_loader = DataLoader(test_dataset, batch_size=args.batch,
                             shuffle=False, pin_memory=True, num_workers=0, collate_fn=lambda x:x)
     test_perf = evaluate(args, test_loader, data, args.traj_max_len, time_emb_model, user_emb_model, cat_emb_model, 
-                         loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, user_mlp_model, loc_input_model, coaction, loss_fn, device)
+                         loc_emb_model, geogcn_model, transformer_encoder_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, loss_fn, device)
     # test_perf = evaluate(args, test_loader, data, args.traj_max_len, time_emb_model, user_emb_model, 
     #                         loc_emb_model, geogcn_model, transformer_encoder_model, loss_fn, device)
     logging.log(23,f"test: loss_total = {val_perf[-1]:.6f} loss_cat = {val_perf[-2]:.6f} loss_loc = {val_perf[-3]:.6f} Acc@20:{test_perf[3]:.4f} Acc@10:{test_perf[2]:.4f} Acc@5:{test_perf[1]:.4f} Acc@1:{test_perf[0]:.4f} MRR:{test_perf[4]:.4f} {runtime:.3f} sec")    

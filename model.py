@@ -177,7 +177,7 @@ class SeqPred(nn.Module):
                 device='cuda'
                 ):
         super(SeqPred, self).__init__()
-        self.dim = args.hidden_dim * 2 + args.time_dim * 3 + 12
+        self.dim = args.hidden_dim * 2 + args.time_dim * 3 + 12 * 2
         self.src_mask = None
         self.pos_encoder = PositionalEncoding(self.dim, args.enc_drop)
         encoder_layers = TransformerEncoderLayer(self.dim, args.enc_nhead, args.enc_ffn_hdim, args.enc_drop)
@@ -307,12 +307,12 @@ class EarlyStopping:
         self.best_epoch = None
         self.best_epoch_val_loss = 0
         
-    def step(self, score, loss, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, loc_input_model, epoch, result_dir):
+    def step(self, score, loss, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, epoch, result_dir):
         if self.best_score is None:
             self.best_score = score
             self.best_epoch = epoch
             self.best_epoch_val_loss = loss
-            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, loc_input_model, result_dir)
+            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, result_dir)
         elif score < self.best_score:
             self.counter += 1
             if self.counter >= self.patience:
@@ -321,18 +321,20 @@ class EarlyStopping:
             self.best_score = score
             self.best_epoch = epoch
             self.best_epoch_val_loss = loss
-            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, loc_input_model, result_dir)
+            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, result_dir)
             self.counter = 0
         return self.early_stop
 
-    def save_checkpoint(self, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, loc_input_model, result_dir):
+    def save_checkpoint(self, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, result_dir):
         # Saves model when validation loss decrease.
         state_dict = {
             'user_emb_model_state_dict': user_model.state_dict(),
             'cat_emb_model_state_dict': cat_model.state_dict(),
             'loc_emb_model_state_dict': loc_model.state_dict(),
             'user_mlp_model_state_dict': user_mlp_model.state_dict(),
+            'cat_mlp_model_state_dict': cat_mlp_model.state_dict(),
             'loc_input_model_state_dict': loc_input_model.state_dict(),
+            'cat_input_model_state_dict': cat_input_model.state_dict(),
             # 'interaction_model_state_dict': interaction_model.state_dict(),
             'geogcn_model_state_dict': gcn_model.state_dict(),
             'transformer_encoder_model_state_dict': enc_model.state_dict()
