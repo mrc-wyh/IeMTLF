@@ -169,11 +169,37 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.size(0), :]
         return self.dropout(x)
 
+class MLP(nn.Module):
+    def __init__(self, inpu_dim, hidden, out_dim, dropout=0.1):
+        super(MLP, self).__init__()
+        self.w_1 = nn.Linear(inpu_dim, hidden)
+        self.w_2 = nn.Linear(hidden, out_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.act = nn.LeakyReLU(0.2)
+        # nn.init.xavier_uniform_(self.w_1.weight, gain=1.414)
+        # nn.init.xavier_uniform_(self.w_2.weight, gain=1.414)
+        self.init_weights()
+
+    def init_weights(self):
+        initrange = 0.1
+        nn.init.zeros_(self.w_1.bias)
+        nn.init.zeros_(self.w_2.bias)
+        nn.init.uniform_(self.w_1.weight, -initrange, initrange)
+        nn.init.uniform_(self.w_2.weight, -initrange, initrange)
+    
+    def forward(self, x, time_given):
+        tmp = self.dropout(self.act(self.w_1(x)))
+        out = self.w_2(tmp * time_given)
+        return out
+        # return self.w_2(self.dropout(self.act(self.w_1(x))))
+
+
 class SeqPred(nn.Module):
     def __init__(self,
                 cat_num,
                 loc_num,
                 args,
+                slotencoding,
                 device='cuda'
                 ):
         super(SeqPred, self).__init__()
@@ -182,9 +208,12 @@ class SeqPred(nn.Module):
         self.pos_encoder = PositionalEncoding(self.dim, args.enc_drop)
         encoder_layers = TransformerEncoderLayer(self.dim, args.enc_nhead, args.enc_ffn_hdim, args.enc_drop)
         self.transformer_encoder = TransformerEncoder(encoder_layers, args.enc_layer_num)
-        self.decoder_cat = nn.Linear(self.dim, cat_num)#解码器->预测语义类别
+        self.decoder_cat = MLP(self.dim, args.time_dim, cat_num)#解码器->预测语义类别
+        # self.decoder_cat = nn.Linear(self.dim, cat_num)#解码器->预测语义类别
         self.decoder_loc = nn.Linear(self.dim, loc_num)#解码器->预测具体位置
-        #解码器可以测试使用MLP的效果
+        
+        self.time_given = slotencoding
+        
         self.init_weights()
     
     def _generate_square_subsequent_mask(self, sz):
@@ -194,13 +223,13 @@ class SeqPred(nn.Module):
     
     def init_weights(self):
         initrange = 0.1
-        nn.init.zeros_(self.decoder_cat.bias)
+        # nn.init.zeros_(self.decoder_cat.bias)
         nn.init.zeros_(self.decoder_loc.bias)
-        nn.init.uniform_(self.decoder_cat.weight, -initrange, initrange)
+        # nn.init.uniform_(self.decoder_cat.weight, -initrange, initrange)
         nn.init.uniform_(self.decoder_loc.weight, -initrange, initrange)
         
     # def forward(self, src, mask):
-    def forward(self, src, key_pad_mask, has_mask=True):
+    def forward(self, src, key_pad_mask, day_mode, week_mode, has_mask=True):
     # def forward(self, src, has_mask=True):
         if has_mask:
             device = src.device
@@ -213,9 +242,21 @@ class SeqPred(nn.Module):
         src = src * math.sqrt(self.dim)
         src = self.pos_encoder(src)
         output = self.transformer_encoder(src, self.src_mask, key_pad_mask.transpose(0, 1)) #shape * batch *dim
+        day_mode_emb = []
+        week_mode_emb = []
+        for i in range(len(day_mode)):
+            day_mode_emb.append(self.time_given(day_mode[i]))
+            week_mode_emb.append(self.time_given(week_mode[i]))
+        day_mode_emb = pad_sequence(day_mode_emb, batch_first=False, padding_value=0.5)
+        week_mode_emb = pad_sequence(week_mode_emb, batch_first=False, padding_value=0.5)
+        
+        time_given_emb = day_mode_emb + week_mode_emb
+        # output = output * time_given_emb
+        
         # output = self.transformer_encoder(src, self.src_mask) #shape * batch *dim
         # output = self.decoder(output)
-        return self.decoder_loc(output), self.decoder_cat(output)
+        return self.decoder_loc(output), self.decoder_cat(output, time_given_emb)
+        # return self.decoder_loc(output), self.decoder_cat(output)
 
 class FFN(nn.Module):
     '''

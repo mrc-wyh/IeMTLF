@@ -54,6 +54,10 @@ def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, 
     batch_cat_labels = []
     labels = []
     src_lengths = []
+    
+    day_mode = []
+    week_mode = []
+    
     #batch_seq_emb: shape:batch * seq_max * hidden_dim(locemb + user_emb + day_of_week.emb + timeslot.emb)
     for i in range(traj_n):        
         if len(data_b[i][0]) <= max:
@@ -66,6 +70,10 @@ def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, 
         loc_labels = traj_labels[:, 0]
         timeslot = traj_forward[:, 1]
         day_of_week = traj_forward[:, 2]
+        
+        day_mode.append(torch.tensor(traj_labels[:, 1]).to(device))
+        week_mode.append(torch.tensor(traj_labels[:, 2]).to(device))
+        
         cat = traj_forward[:, 3]
         cat_labels = traj_labels[:, 3]
         loc_s_emb = loc_emb[loc] #shape:traj_len * hidden_dim
@@ -138,10 +146,15 @@ def batch_seq_emb(args, data_b, max, cat_emb, loc_emb, pos_emb, user_emb_model, 
     batch_loc_labels_pad = pad_sequence(batch_loc_labels, batch_first=False, padding_value=-1)
     batch_cat_labels_pad = pad_sequence(batch_cat_labels, batch_first=False, padding_value=-1)
     
+    # batch_day_mode_pad = pad_sequence(day_mode, batch_first=False, padding_value=-1)
+    # batch_week_mode_pad = pad_sequence(week_mode, batch_first=False, padding_value=-1)
+    
     #增加_key_padding_mask
     key_pad_mask = torch.where(batch_loc_labels_pad==-1, True, False)
 
-    return batch_pad_emb, batch_loc_labels_pad, batch_cat_labels_pad, labels, key_pad_mask 
+    # return batch_pad_emb, batch_loc_labels_pad, batch_cat_labels_pad, labels, key_pad_mask, batch_day_mode_pad, batch_week_mode_pad 
+    return batch_pad_emb, batch_loc_labels_pad, batch_cat_labels_pad, labels, key_pad_mask, day_mode, week_mode
+    # return batch_pad_emb, batch_loc_labels_pad, batch_cat_labels_pad, labels, key_pad_mask 
 
 
 def cal_acc_mrr(idxx, label, indices):
@@ -204,12 +217,14 @@ def evaluate(args, valid_loader, data, max_len, time_emb_model, user_emb_model, 
     for b, data_b in enumerate(valid_loader): 
         # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, 
         #                                                                      user_emb_model, device)
-        batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, 
+        batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask, day_mode, week_mode = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, 
                                                                              user_emb_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, device)
-        # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, user_emb_model, device)
-        # batch_emb, labels_emb, label_loc = batch_seq_emb(data_b, max_len, loc_emb, time_emb_model, user_emb_model, device)
-        seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask)
-        # seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb)
+        
+        # batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask = batch_seq_emb(args, data_b, max_len, cat_emb, loc_emb, time_emb_model, 
+        #                                                                      user_emb_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, device)
+                
+        seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask, day_mode, week_mode)
+        # seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask)
 
         #计算loss 
         loss_loc = loss_fn(seq_out_loc.transpose(1, 2), loc_labels_emb)
@@ -256,7 +271,7 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     setup_seed(args.seed)
     # result_dir = increment_path('run-NYC/' + args.run_directory + str(args.enc_layer_num) +'-'+str(args.GeoGCN_layer_num)+'-'+ str(args.lr_patience), sep='-')
-    result_dir = increment_path('run-NYC/' + args.run_directory +'-' + 'coaction', sep='-')
+    result_dir = increment_path('run-NYC/' + args.run_directory +'-' + 'given_time', sep='-')
     if not os.path.exists(result_dir): os.makedirs(result_dir)
     logging.Formatter.converter = beijing
     log_name=(datetime.datetime.now() + datetime.timedelta(hours=8)).strftime('%Y-%m-%d')
@@ -301,7 +316,8 @@ def main(args):
     interaction_model = Interaction(args.time_dim, args.time_dim, args.time_dim).to(device)
 
     geogcn_model = GeoGCN(data.loc_g, data.tran_edge_weight, args, device).to(device)
-    transformer_encoder_model = SeqPred(data.cat_num, data.loc_num, args, device).to(device)
+    transformer_encoder_model = SeqPred(data.cat_num, data.loc_num, args, time_emb_model, device).to(device)
+    # transformer_encoder_model = SeqPred(data.cat_num, data.loc_num, args, device).to(device)
     optimizer = torch.optim.Adam(params=list(user_emb_model.parameters()) +
                                   list(cat_emb_model.parameters()) +
                                   list(loc_emb_model.parameters()) +
@@ -352,11 +368,14 @@ def main(args):
             loc_emb = loc_emb_model(torch.tensor(range(data.loc_num)).to(device))
             loc_emb = geogcn_model(loc_emb)
             # cat_emb = cluster_center(data.loc_cat, loc_emb, device)
-            batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask = batch_seq_emb(args, data_b, args.traj_max_len, cat_emb, loc_emb, time_emb_model, 
+            batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask, day_mode, week_mode = batch_seq_emb(args, data_b, args.traj_max_len, cat_emb, loc_emb, time_emb_model, 
                                                                                  user_emb_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, device)
+            
+            # batch_emb, loc_labels_emb, cat_labels_emb, label_loc, key_pad_mask = batch_seq_emb(args, data_b, args.traj_max_len, cat_emb, loc_emb, time_emb_model, 
+            #                                                                      user_emb_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, coaction, device)
             # batch_emb, loc_labels_emb, cat_labels_emb, label_loc = batch_seq_emb(args, data_b, args.traj_max_len, cat_emb, loc_emb, time_emb_model, 
             #                                                                      user_emb_model, device)
-            seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask)
+            seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb, key_pad_mask, day_mode, week_mode)
             # seq_out_loc, seq_out_cat = transformer_encoder_model(batch_emb)
             #计算loss 
             loss_loc = loss_fn(seq_out_loc.transpose(1, 2), loc_labels_emb)#具体位置交叉熵
@@ -507,7 +526,7 @@ if __name__ == '__main__':
     parser.add_argument("--enc_ffn_hdim", type=int, default=1024, help="TransformerEncoderLayer FFN hidden dim")
     parser.add_argument("--gcn_drop", type=float, default=0, help="GeoGCN dropout probability")
     parser.add_argument("--enc_drop", type=float, default=0.2, help="Encoder dropout probability")
-    parser.add_argument('--hidden_dim', type=int, default=128, help='Model Layer connection dim')          
+    parser.add_argument('--hidden_dim', type=int, default=64, help='Model Layer connection dim')          
     parser.add_argument('--time_dim', type=int, default=32, help='Model Layer connection dim')          
     parser.add_argument('--enc_layer_num', type=int, default=1, help='Number of TransformerEncoder layers.')     
     parser.add_argument('--GeoGCN_layer_num', type=int, default=2, help='Number of Conv layers.')     
