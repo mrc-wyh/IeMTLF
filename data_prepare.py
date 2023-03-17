@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 # import torch
 # import random as rd
-# import scipy.sparse as sp
+import scipy.sparse as sp
 import dgl
 import pickle
 import os, sys
@@ -50,7 +50,8 @@ class Data(object):
         #     l = list(loc_g['loc_new_ID'])
         #     cat_has_loc.append(l)
         self.loc_cat = loc_map_cat
-        self.loc_g, self.tran_edge_weight = self.build_graph(geo_edge, tran_edge, cat_edge)
+        self.loc_g, self.tran_edge_weight = self.build_graph(geo_edge, tran_edge, cat_edge)        
+        self.trans_matrix = self.tran_matrix(tran_edge)        
         # self.loc_g, self.tran_edge_weight = self.build_graph(geo_edge, tran_edge)
         print(self.cat_num, self.loc_num, self.user_num)
         
@@ -90,6 +91,27 @@ class Data(object):
             ('loc', 'trans', 'loc'): tran_e
         }
         return dgl.heterograph(data_dict), tran_e_w
+    
+    def tran_matrix(self, tran_edge):
+        trans = tran_edge[['src', 'dst', 'freq']]
+        trans = trans.sort_values(by='src').replace(True)
+        trans.index = range(len(trans))
+        gtedge_g = trans.groupby(by='src')
+        trans_prob = pd.DataFrame()
+        for src, e in gtedge_g:
+            e.index = range(len(e))
+            total_freq = e['freq'].sum()
+            e['weight'] = e['freq'] / total_freq
+            trans_prob = pd.concat((trans_prob, e))
+        trans_prob = trans_prob.sort_values(by=['src', 'dst']).replace(True)
+        trans_prob = trans_prob[['src', 'dst', 'weight']]
+        trans_prob.index = range(len(trans_prob))
+        row = np.array(trans_prob['src'])
+        col = np.array(trans_prob['dst'])
+        data = np.array(trans_prob['weight'])
+        
+        return sp.coo_matrix((data, (row, col)), shape=(self.loc_num, self.loc_num), dtype=np.float)
+    
     
     # def build_graph(self, geo_edge, tran_edge):
     #     geo = np.array(geo_edge)

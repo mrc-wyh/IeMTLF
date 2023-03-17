@@ -191,8 +191,6 @@ class MLP(nn.Module):
         tmp = self.dropout(self.act(self.w_1(x)))
         out = self.w_2(tmp * time_given)
         return out
-        # return self.w_2(self.dropout(self.act(self.w_1(x))))
-
 
 class SeqPred(nn.Module):
     def __init__(self,
@@ -208,13 +206,14 @@ class SeqPred(nn.Module):
         self.pos_encoder = PositionalEncoding(self.dim, args.enc_drop)
         encoder_layers = TransformerEncoderLayer(self.dim, args.enc_nhead, args.enc_ffn_hdim, args.enc_drop)
         self.transformer_encoder = TransformerEncoder(encoder_layers, args.enc_layer_num)
-        self.decoder_cat = MLP(self.dim, args.time_dim, cat_num)#解码器->预测语义类别
+        self.decoder_cat = MLP(self.dim, args.time_dim, cat_num) if args.dec_time else nn.Linear(self.dim, cat_num)
         # self.decoder_cat = nn.Linear(self.dim, cat_num)#解码器->预测语义类别
         self.decoder_loc = nn.Linear(self.dim, loc_num)#解码器->预测具体位置
-        
         self.time_given = slotencoding
-        
+        self.dec_time = args.dec_time
         self.init_weights()
+        self.device = device
+        
     
     def _generate_square_subsequent_mask(self, sz):
         mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
@@ -223,14 +222,14 @@ class SeqPred(nn.Module):
     
     def init_weights(self):
         initrange = 0.1
-        # nn.init.zeros_(self.decoder_cat.bias)
         nn.init.zeros_(self.decoder_loc.bias)
-        # nn.init.uniform_(self.decoder_cat.weight, -initrange, initrange)
         nn.init.uniform_(self.decoder_loc.weight, -initrange, initrange)
+        if not self.dec_time:
+            nn.init.zeros_(self.decoder_cat.bias)
+            nn.init.uniform_(self.decoder_cat.weight, -initrange, initrange)
         
-    # def forward(self, src, mask):
+        
     def forward(self, src, key_pad_mask, day_mode, week_mode, has_mask=True):
-    # def forward(self, src, has_mask=True):
         if has_mask:
             device = src.device
             if self.src_mask is None or self.src_mask.size(0) != len(src):
@@ -242,27 +241,38 @@ class SeqPred(nn.Module):
         src = src * math.sqrt(self.dim)
         src = self.pos_encoder(src)
         output = self.transformer_encoder(src, self.src_mask, key_pad_mask.transpose(0, 1)) #shape * batch *dim
-        day_mode_emb = []
-        week_mode_emb = []
-        for i in range(len(day_mode)):
-            day_mode_emb.append(self.time_given(day_mode[i]))
-            week_mode_emb.append(self.time_given(week_mode[i]))
-        day_mode_emb = pad_sequence(day_mode_emb, batch_first=False, padding_value=0.5)
-        week_mode_emb = pad_sequence(week_mode_emb, batch_first=False, padding_value=0.5)
-        
-        time_given_emb = day_mode_emb + week_mode_emb
-        # output = output * time_given_emb
-        
-        # output = self.transformer_encoder(src, self.src_mask) #shape * batch *dim
-        # output = self.decoder(output)
-        return self.decoder_loc(output), self.decoder_cat(output, time_given_emb)
-        # return self.decoder_loc(output), self.decoder_cat(output)
+        loc_out = self.decoder_loc(output)
+        # correct = []
+        # values = trans_matrix.data
+        # indices = np.vstack((trans_matrix.row, trans_matrix.col))
+        # i = torch.LongTensor(indices)
+        # v = torch.FloatTensor(values)
+        # shape = trans_matrix.shape
+        # trans_matrix_tensor = torch.sparse.FloatTensor(i, v, torch.Size(shape)).to(self.device)
+        # for i in range(len(prior_loc)):
+        #     tmp = []
+        #     for j in range(len(prior_loc[i])):
+        #         tmp.append(trans_matrix_tensor[prior_loc[i][j]].to_dense())
+        #     correct.append(torch.stack(tmp))
+        # correct = pad_sequence(correct)
+        # loc_out = loc_out + correct  
+        if self.dec_time:
+            day_mode_emb = []
+            week_mode_emb = []
+            for i in range(len(day_mode)):
+                day_mode_emb.append(self.time_given(day_mode[i]))
+                week_mode_emb.append(self.time_given(week_mode[i]))
+            day_mode_emb = pad_sequence(day_mode_emb, batch_first=False, padding_value=0.5)
+            week_mode_emb = pad_sequence(week_mode_emb, batch_first=False, padding_value=0.5)
+            
+            time_given_emb = day_mode_emb + week_mode_emb
+            cat_out = self.decoder_cat(output, time_given_emb)
+        else:
+            cat_out = self.decoder_cat(output)
+        return loc_out, cat_out
 
+'''
 class FFN(nn.Module):
-    '''
-    This module implements feed-forward network(after the Multi-Head Network) equation:
-    FFN(x) = max(0, x @ W_1 + b_1) @ W_2 + b_2
-    '''
     def __init__(self, inpu_dim, hidden, out_dim, dropout=0.1):
         super(FFN, self).__init__()
         self.w_1 = nn.Linear(inpu_dim, hidden)
@@ -275,23 +285,20 @@ class FFN(nn.Module):
     def forward(self, x):
         return self.w_2(self.dropout(self.act(self.w_1(x))))
         # return self.w_2(self.dropout(torch.relu(self.w_1(x))))
+'''
 
 class Gen_Coaction(nn.Module):
     def __init__(self, args, orders=2):
         super(Gen_Coaction, self).__init__()
-        # self.dim = dim
         self.weight_emb_w = args.co_action_w
         self.orders = orders
 
     def forward(self, input, mlp):
-        # weight = []
-        # idx = 0
         weight_orders = []
         for i in range(self.orders):
             weight= []
             idx = 0 
             for w in self.weight_emb_w:
-                # print(w[0]*w[1])
                 weight.append(torch.reshape(mlp[:, idx:idx+w[0]*w[1]], [-1, w[0], w[1]]))
                 idx += w[0] * w[1]
             weight_orders.append(weight)
@@ -311,7 +318,8 @@ class Gen_Coaction(nn.Module):
             out_seq.append(torch.concat(h_order, 2))
         out = torch.sum(torch.concat(out_seq, 1), 1)
         return out
-    
+
+'''    
 class Interaction(nn.Module):#MLP方式的交互
     def __init__(self, dim1, dim2, out_dim):
         super(Interaction, self).__init__()
@@ -325,6 +333,7 @@ class Interaction(nn.Module):#MLP方式的交互
         x = self.mul_inter(torch.cat((emb1, emb2), 1))
         x = self.leaky_relu(x)
         return x
+'''
 
 class DatasetPrePare(Dataset):
     def __init__(self, forward, label, user):
@@ -348,12 +357,12 @@ class EarlyStopping:
         self.best_epoch = None
         self.best_epoch_val_loss = 0
         
-    def step(self, score, loss, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, epoch, result_dir):
+    def step(self, score, loss, user_model, cat_model, loc_model, gcn_model, enc_model, user_mlp_model, cat_mlp_model, loc_input_model, epoch, result_dir):
         if self.best_score is None:
             self.best_score = score
             self.best_epoch = epoch
             self.best_epoch_val_loss = loss
-            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, result_dir)
+            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, user_mlp_model, cat_mlp_model, loc_input_model, result_dir)
         elif score < self.best_score:
             self.counter += 1
             if self.counter >= self.patience:
@@ -362,11 +371,11 @@ class EarlyStopping:
             self.best_score = score
             self.best_epoch = epoch
             self.best_epoch_val_loss = loss
-            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, result_dir)
+            self.save_checkpoint(user_model, cat_model, loc_model, gcn_model, enc_model, user_mlp_model, cat_mlp_model, loc_input_model, result_dir)
             self.counter = 0
         return self.early_stop
 
-    def save_checkpoint(self, user_model, cat_model, loc_model, gcn_model, enc_model, interaction_model, user_mlp_model, cat_mlp_model, loc_input_model, cat_input_model, result_dir):
+    def save_checkpoint(self, user_model, cat_model, loc_model, gcn_model, enc_model, user_mlp_model, cat_mlp_model, loc_input_model, result_dir):
         # Saves model when validation loss decrease.
         state_dict = {
             'user_emb_model_state_dict': user_model.state_dict(),
@@ -375,8 +384,6 @@ class EarlyStopping:
             'user_mlp_model_state_dict': user_mlp_model.state_dict(),
             'cat_mlp_model_state_dict': cat_mlp_model.state_dict(),
             'loc_input_model_state_dict': loc_input_model.state_dict(),
-            'cat_input_model_state_dict': cat_input_model.state_dict(),
-            # 'interaction_model_state_dict': interaction_model.state_dict(),
             'geogcn_model_state_dict': gcn_model.state_dict(),
             'transformer_encoder_model_state_dict': enc_model.state_dict()
             } 
