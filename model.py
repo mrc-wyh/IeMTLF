@@ -25,15 +25,14 @@ class GeoGCNLayer(nn.Module):
         self.act = nn.LeakyReLU(0.2)
         self.is_att = args.is_att #地理空间影响和时序转移影响融合是否采用注意力方式
         self.is_sgc = args.is_sgc #是否采用SGC方式，即去掉非线性变化处理
-        # self.geo_w = args.geo_w
-        # self.tran_w = args.tran_w
-        # self.cat_w = args.cat_w
+        self.args = args
         self.is_lightgcn = args.is_lightgcn
         if self.is_att:
-            self.attn_fuse = SemanticAttention(args.hidden_dim, args.hidden_dim*4)
-        if not args.is_lightgcn:
-            self.feat_tran = nn.Linear(args.hidden_dim, args.hidden_dim, bias=False)
-            nn.init.xavier_uniform_(self.feat_tran.weight, gain=1.414)
+            self.attn_fuse = SemanticAttention(args.loc_dim, args.loc_dim*4)
+        # if not args.is_lightgcn:
+        #     self.feat_tran = nn.Linear(args.hidden_dim, args.hidden_dim, bias=False)
+        #     nn.init.xavier_uniform_(self.feat_tran.weight, gain=1.414)
+  
         
     def forward(self, feat):
         funcs = {}#message and reduce functions dict
@@ -46,38 +45,17 @@ class GeoGCNLayer(nn.Module):
                 funcs[etype] = (fn.copy_u('f', 'm'), fn.mean('m', 'cat'))
             else:
                 funcs[etype] = (fn.u_mul_e('f', 'w', 'm'), fn.sum('m', 'trans'))
-        # for srctype, etype, dsttype in self.g.canonical_etypes:
-        #     if etype == 'geo':
-        #         if self.geo_w == 0 and not self.is_att:
-        #             continue
-        #         else:
-        #             funcs[etype] = (fn.copy_u('f', 'm'), fn.mean('m', 'geo'))
-        #     elif etype == 'trans':
-        #         if self.tran_w == 0 and not self.is_att:
-        #             continue
-        #         else:
-        #             funcs[etype] = (fn.u_mul_e('f', 'w', 'm'), fn.sum('m', 'trans'))
-        #     else:
-        #         if self.cat_w == 0 and not self.is_att:
-        #             continue
-        #         else:
-        #             funcs[etype] = (fn.copy_u('f', 'm'), fn.mean('m', 'cat'))
                     
         self.g.multi_update_all(funcs, 'sum')
         if self.is_att: #采用注意力融合
             geo = self.g.ndata['geo'].unsqueeze(1)
             trans = self.g.ndata['trans'].unsqueeze(1)
-            cat = self.g.ndata['cat'].unsqueeze(1)
-            # z = torch.cat([geo, trans], 1)
-            z = torch.cat([geo, trans, cat], 1)
+            if not self.args.base and self.args.cp4:
+                cat = self.g.ndata['cat'].unsqueeze(1)
+                z = torch.cat([geo, trans, cat], 1)
+            else:
+                z = torch.cat([geo, trans], 1)
             feat = self.attn_fuse(z)
-        # else:#采用加权方式（人工设置相应权重系数）
-        #     if self.geo_w == 0:
-        #         feat = self.g.ndata['trans']
-        #     elif self.tran_w == 0:
-        #         feat = self.g.ndata['geo']
-        #     else:
-        #         feat = self.geo_w * self.g.ndata['geo'] + self.tran_w * self.g.ndata['trans']
         return feat if self.is_sgc else self.act(feat)
 
 class SemanticAttention(nn.Module):
@@ -105,20 +83,15 @@ class GeoGCN(nn.Module):
                 device='cuda'
                 ):
         super(GeoGCN, self).__init__()
-        # self.tran_w = torch.tensor(tran_weight).to(device)
         g = g.int()
         g = dgl.remove_self_loop(g, etype='geo')
         g = dgl.add_self_loop(g, etype='geo')
         self.g = g.to(device)
         self.g.edges['trans'].data['w'] = torch.tensor(tran_e_w).float().to(device)
         self.num_layer = args.GeoGCN_layer_num
-        self.dropout = args.gcn_drop
+        # self.dropout = args.gcn_drop
         self.device = device
         self.act = nn.LeakyReLU(0.2)
-        # self.is_space2vec = args.is_space2vec
-        # if args.is_space2vec:
-        #     self.feat_tran = nn.Linear(args.frequency_num * 4, args.hidden_dim, bias=False)
-        #     nn.init.xavier_uniform_(self.l_l.weight, gain=1.414)
             
         self.gcn = nn.ModuleList()
         for i in range(self.num_layer):
@@ -129,8 +102,8 @@ class GeoGCN(nn.Module):
     def forward(self, feat):
         for i in range(self.num_layer - 1):
             feat = self.gcn[i](feat)
-        if self.num_layer > 1:
-            feat = F.dropout(feat, self.dropout)
+        # if self.num_layer > 1:
+        #     feat = F.dropout(feat, self.dropout)
         feat = self.gcn[-1](feat)
         return feat
 
@@ -153,7 +126,7 @@ class SlotEncoding(nn.Module):
         return torch.index_select(self.pe, 1, pos).squeeze(0)
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
+    def __init__(self, d_model, dropout=0.1, max_len=100):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
 
@@ -201,20 +174,48 @@ class SeqPred(nn.Module):
                 device='cuda'
                 ):
         super(SeqPred, self).__init__()
-        self.dim = args.hidden_dim * 2 + args.time_dim * 3 + 12 * 2
+        if args.base:
+            if args.cp1:
+                self.dim = args.user_dim + args.loc_dim + args.time_dim + 12
+            else:
+                self.dim = args.user_dim + args.loc_dim + args.time_dim
+        # else:
+        #     if args.cp1 or args.cp2 or args.cp3:
+        #         self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim + 12
+        #     else:
+        #         self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim    
+        
+        else:
+            if args.cp1 and not args.cp2 and not args.cp3:#1,0,0
+                self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim + 12
+            elif not args.cp1 and args.cp2 and not args.cp3:#0,1,0
+                self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim + 12
+            elif not args.cp1 and not args.cp2 and args.cp3:#0,0,1
+                self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim + 12
+            elif args.cp1 and args.cp2 and not args.cp3:#1,1,0
+                self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim + 12 * 2
+            elif args.cp1 and not args.cp2 and args.cp3:#1,0,1
+                self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim + 12 * 2
+            elif not args.cp1 and args.cp2 and args.cp3:#0,1,1
+                self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim + 12 * 2
+            elif args.cp1 and args.cp2 and args.cp3:#1,1,1
+                self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim + 12 * 3
+            else:
+                self.dim = args.user_dim + args.loc_dim + args.cat_dim + args.time_dim
         self.src_mask = None
-        self.pos_encoder = PositionalEncoding(self.dim, args.enc_drop)
-        encoder_layers = TransformerEncoderLayer(self.dim, args.enc_nhead, args.enc_ffn_hdim, args.enc_drop)
+        self.pos_encoder = PositionalEncoding(int(self.dim), args.enc_drop)
+        encoder_layers = TransformerEncoderLayer(int(self.dim), args.enc_nhead, args.enc_ffn_hdim, args.enc_drop)
         self.transformer_encoder = TransformerEncoder(encoder_layers, args.enc_layer_num)
-        self.decoder_cat = MLP(self.dim, args.time_dim, cat_num) if args.dec_time else nn.Linear(self.dim, cat_num)
+        if not args.base:
+            self.decoder_cat = MLP(int(self.dim), args.time_dim, cat_num) if args.dec_time else nn.Linear(int(self.dim), cat_num)
         # self.decoder_cat = nn.Linear(self.dim, cat_num)#解码器->预测语义类别
-        self.decoder_loc = nn.Linear(self.dim, loc_num)#解码器->预测具体位置
+        self.decoder_loc = nn.Linear(int(self.dim), loc_num)#解码器->预测具体位置
         self.time_given = slotencoding
         self.dec_time = args.dec_time
+        self.args = args
         self.init_weights()
         self.device = device
-        
-    
+           
     def _generate_square_subsequent_mask(self, sz):
         mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
@@ -224,7 +225,8 @@ class SeqPred(nn.Module):
         initrange = 0.1
         nn.init.zeros_(self.decoder_loc.bias)
         nn.init.uniform_(self.decoder_loc.weight, -initrange, initrange)
-        if not self.dec_time:
+        # if not self.dec_time:
+        if not self.dec_time and not self.args.base:
             nn.init.zeros_(self.decoder_cat.bias)
             nn.init.uniform_(self.decoder_cat.weight, -initrange, initrange)
         
@@ -267,9 +269,12 @@ class SeqPred(nn.Module):
             
             time_given_emb = day_mode_emb + week_mode_emb
             cat_out = self.decoder_cat(output, time_given_emb)
-        else:
+        if not self.args.base:
             cat_out = self.decoder_cat(output)
-        return loc_out, cat_out
+        if self.args.base:
+            return loc_out
+        else:
+            return loc_out, cat_out
 
 '''
 class FFN(nn.Module):
@@ -383,7 +388,7 @@ class EarlyStopping:
             'loc_emb_model_state_dict': loc_model.state_dict(),
             'user_mlp_model_state_dict': user_mlp_model.state_dict(),
             'cat_mlp_model_state_dict': cat_mlp_model.state_dict(),
-            'loc_input_model_state_dict': loc_input_model.state_dict(),
+            'loc_input_model_state_dict': loc_input_model.state_dict(),                      
             'geogcn_model_state_dict': gcn_model.state_dict(),
             'transformer_encoder_model_state_dict': enc_model.state_dict()
             } 

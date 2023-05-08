@@ -50,8 +50,8 @@ class Data(object):
         #     l = list(loc_g['loc_new_ID'])
         #     cat_has_loc.append(l)
         self.loc_cat = loc_map_cat
-        self.loc_g, self.tran_edge_weight = self.build_graph(geo_edge, tran_edge, cat_edge)        
-        self.trans_matrix = self.tran_matrix(tran_edge)        
+        self.loc_g, self.tran_edge_weight = self.build_graph(args, geo_edge, tran_edge, cat_edge)        
+        # self.trans_matrix = self.tran_matrix(tran_edge)        
         # self.loc_g, self.tran_edge_weight = self.build_graph(geo_edge, tran_edge)
         print(self.cat_num, self.loc_num, self.user_num)
         
@@ -76,8 +76,26 @@ class Data(object):
         print('train traj num:', len(self.train_forward))
         print('valid traj num:', len(self.valid_forward))
         print('test traj num:', len(self.test_forward))
-        
-    def build_graph(self, geo_edge, tran_edge, cat_edge):
+
+    # def build_graph(self, args, geo_edge, tran_edge, cat_edge):
+    #     geo = np.array(geo_edge)
+    #     geo_e = [tuple(geo[i]) for i in range(len(geo))]
+    #     cat = np.array(cat_edge)
+    #     cat_e = [tuple(cat[i]) for i in range(len(cat))]
+    #     tran = np.array(tran_edge[['src', 'dst']])
+    #     tran_e_w = np.array(tran_edge['weight'])
+    #     tran_e = [tuple(tran[i]) for i in range(len(tran))]
+    #     g_list = []
+    #     geo_g = dgl.graph(geo_e)
+    #     tran_g = dgl.graph(tran_e)
+    #     g_list.append(geo_g)
+    #     g_list.append(tran_g)
+    #     if not args.base and args.cp4:
+    #         cat_g = dgl.graph(cat_e)
+    #         g_list.append(cat_g)
+    #     return g_list, tran_e_w
+       
+    def build_graph(self, args, geo_edge, tran_edge, cat_edge):
         geo = np.array(geo_edge)
         geo_e = [tuple(geo[i]) for i in range(len(geo))]
         cat = np.array(cat_edge)
@@ -85,11 +103,17 @@ class Data(object):
         tran = np.array(tran_edge[['src', 'dst']])
         tran_e_w = np.array(tran_edge['weight'])
         tran_e = [tuple(tran[i]) for i in range(len(tran))]
-        data_dict = {
+        if not args.base and args.cp4:
+            data_dict = {
+                ('loc', 'geo', 'loc'): geo_e,
+                ('loc', 'cat', 'loc'): cat_e,
+                ('loc', 'trans', 'loc'): tran_e
+            }
+        else:
+            data_dict = {
             ('loc', 'geo', 'loc'): geo_e,
-            ('loc', 'cat', 'loc'): cat_e,
             ('loc', 'trans', 'loc'): tran_e
-        }
+            }
         return dgl.heterograph(data_dict), tran_e_w
     
     def tran_matrix(self, tran_edge):
@@ -111,16 +135,3 @@ class Data(object):
         data = np.array(trans_prob['weight'])
         
         return sp.coo_matrix((data, (row, col)), shape=(self.loc_num, self.loc_num), dtype=np.float)
-    
-    
-    # def build_graph(self, geo_edge, tran_edge):
-    #     geo = np.array(geo_edge)
-    #     geo_e = [tuple(geo[i]) for i in range(len(geo))]
-    #     tran = np.array(tran_edge[['src', 'dst']])
-    #     tran_e_w = np.array(tran_edge['weight'])
-    #     tran_e = [tuple(tran[i]) for i in range(len(tran))]
-    #     data_dict = {
-    #         ('loc', 'geo', 'loc'): geo_e,
-    #         ('loc', 'trans', 'loc'): tran_e
-    #     }
-    #     return dgl.heterograph(data_dict), tran_e_w
