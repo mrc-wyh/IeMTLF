@@ -40,11 +40,11 @@ class GeoGCNLayer(nn.Module):
         self.g.ndata['f'] = feat_t
         for srctype, etype, dsttype in self.g.canonical_etypes:
             if etype == 'geo':
-                funcs[etype] = (fn.copy_u('f', 'm'), fn.mean('m', 'geo'))
+                funcs[etype] = (fn.copy_u('f', 'mg'), fn.mean('mg', 'geo'))
             elif etype == 'cat':
-                funcs[etype] = (fn.copy_u('f', 'm'), fn.mean('m', 'cat'))
+                funcs[etype] = (fn.copy_u('f', 'mc'), fn.mean('mc', 'cat'))
             else:
-                funcs[etype] = (fn.u_mul_e('f', 'w', 'm'), fn.sum('m', 'trans'))
+                funcs[etype] = (fn.u_mul_e('f', 'w', 'mt'), fn.sum('mt', 'trans'))
                     
         self.g.multi_update_all(funcs, 'sum')
         if self.is_att: #采用注意力融合
